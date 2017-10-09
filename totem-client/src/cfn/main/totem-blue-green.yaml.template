@@ -1,0 +1,158 @@
+# Copyright 2017 D2L Corporation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Outputs:
+  # These outputs are used to pass info between the current phase and the next phase.
+  NextColor:
+    Value: !If [ IsDeploy, !If [ IsBlue, GREEN, BLUE ], !Ref Color ]
+
+  # These outputs are used to pass info between the current pipeline run and the next run.
+  FinalColor:
+    Value: !If [ IsPostDeploy, !Ref Color, @COLOR@ ]
+  FinalIsFirstRun:
+    Value: !If [ IsPostDeploy, false, @IS_FIRST_RUN@ ]
+  FinalProdTemplateURL:
+    Value: @DEV_TEMPLATE_URL@
+
+  # These outputs are information for humans; they are not required by the pipeline.
+  Color:
+    Value: !Ref Color
+  Phase:
+    Value: !Ref Phase
+  IsFirstRun:
+    Value: !Ref IsFirstRun
+
+  ActiveStack:
+    Value: !If [ IsBlueStackActive, !If [ IsGreenStackActive, BOTH, BLUE ], !If [ IsGreenStackActive, GREEN, NONE ] ]
+  MasterStackColor:
+    Value: !If [ IsBlueStackMaster, !If [ IsGreenStackMaster, BOTH, BLUE ], !If [ IsGreenStackMaster, GREEN, NONE ] ]
+
+  IsGreenStackUsingProdTemplate:
+    Value: !If [ IsGreenStackUsingProdTemplate, true, false ]
+  IsBlueStackUsingProdTemplate:
+    Value: !If [ IsBlueStackUsingProdTemplate, true, false ]
+
+  IsTestOutgressStackActive:
+    Value: !If [ IsDeploy, true, false ]
+
+Parameters:
+  # These inputs are the state variables: they define the state of the pipeline
+  Color:
+    Type: String
+    AllowedValues: [ BLUE, GREEN ]
+    Default: @COLOR@
+  Phase:
+    Type: String
+    AllowedValues: [ PRE_DEPLOY, DEPLOY, POST_DEPLOY ]
+    Default: PRE_DEPLOY
+  IsFirstRun:
+    Type: String
+    AllowedValues: [ true, false ]
+    Default: @IS_FIRST_RUN@
+
+Conditions:
+  IsBlue: !Equals [ !Ref Color, BLUE ]
+  IsGreen: !Equals [ !Ref Color, GREEN ]
+
+  IsPreDeploy: !Equals [ !Ref Phase, PRE_DEPLOY ]
+  IsDeploy: !Equals [ !Ref Phase, DEPLOY ]
+  IsPostDeploy: !Equals [ !Ref Phase, POST_DEPLOY ]
+
+  IsFirstRun: !Equals [ !Ref IsFirstRun, true ]
+
+  IsBlueStackActive: !Or
+  - !And 
+    - !Not [ Condition: IsFirstRun ]
+    - !Not [ !And [ Condition: IsGreen, Condition: IsPreDeploy ] ]
+  - !And
+    - Condition: IsFirstRun
+    - !Or [ Condition: IsGreenDeploy, !And [ Condition: IsBlue, Condition: IsPostDeploy ] ]
+  IsBlueStackMaster: !And [ Condition: IsBlueStackActive, Condition: IsBlue ]
+  IsBlueDeploy: !And [ Condition: IsBlue, Condition: IsDeploy ]
+  IsBlueStackUsingProdTemplate: !Or
+  - !And [ Condition: IsBlue, !Not [ Condition: IsPostDeploy ] ]
+  - !And [ Condition: IsGreen, Condition: IsPostDeploy ]
+
+  IsGreenStackActive: !Or
+  - !And 
+    - !Not [ Condition: IsFirstRun ]
+    - !Not [ !And [ Condition: IsBlue, Condition: IsPreDeploy ] ]
+  - !And
+    - Condition: IsFirstRun
+    - !Or [ Condition: IsBlueDeploy, !And [ Condition: IsGreen, Condition: IsPostDeploy ] ]
+  IsGreenStackMaster: !And [ Condition: IsGreenStackActive, Condition: IsGreen ]
+  IsGreenDeploy: !And [ Condition: IsGreen, Condition: IsDeploy ]
+  IsGreenStackUsingProdTemplate: !Or
+  - !And [ Condition: IsGreen, !Not [ Condition: IsPostDeploy ] ]
+  - !And [ Condition: IsBlue, Condition: IsPostDeploy ]
+
+  IsPermanentIngressStackActive: !Or
+  - !Not [ Condition: IsFirstRun ]
+  - !And
+    - Condition: IsFirstRun
+    - Condition: IsPostDeploy
+
+Resources:
+  PermanentOutgressStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../../../../src/cfn/main/permanent-outgress.yaml
+
+  TestOutgressStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsDeploy
+    Properties:
+      TemplateURL: ../../../../src/cfn/test/test-outgress.yaml
+
+  BlueStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsBlueStackActive
+    Properties:
+      TemplateURL: !If
+      - IsBlueStackUsingProdTemplate
+      - @PROD_TEMPLATE_URL@
+      - @DEV_TEMPLATE_URL@
+      Parameters:
+        InputValues: !If
+        - IsGreenDeploy
+        - !GetAtt TestOutgressStack.Outputs.OutputValues
+        - !GetAtt PermanentOutgressStack.Outputs.OutputValues
+
+  GreenStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsGreenStackActive
+    Properties:
+      TemplateURL: !If
+      - IsGreenStackUsingProdTemplate
+      - @PROD_TEMPLATE_URL@
+      - @DEV_TEMPLATE_URL@
+      Parameters:
+        InputValues: !If
+        - IsBlueDeploy
+        - !GetAtt TestOutgressStack.Outputs.OutputValues
+        - !GetAtt PermanentOutgressStack.Outputs.OutputValues
+
+  PermanentIngressStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsPermanentIngressStackActive
+    Properties:
+      TemplateURL: ../../../../src/cfn/main/permanent-ingress.yaml
+      Parameters:
+        InputValues: !If
+        - IsBlue
+        - !GetAtt BlueStack.Outputs.OutputValues
+        - !GetAtt GreenStack.Outputs.OutputValues
+
